@@ -1,0 +1,643 @@
+name: Linux ARM64 构建 (公开仓库版本)
+
+# 这个文件应该放在公开仓库中
+# 它会拉取私有仓库的代码进行 ARM 架构构建
+
+# ============================================
+# 配置私有仓库信息（在这里修改）
+# ============================================
+env:
+  PRIVATE_REPO: 'print520/NetAPP'  # 修改为你的私有仓库地址 (格式: owner/repo)
+  PRIVATE_REPO_REF: 'main'         # 修改为你要构建的分支/标签/commit
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_urls:
+        description: '配置URL列表（以逗号分隔）'
+        required: true
+        default: ''
+      update_url:
+        description: '更新检查URL'
+        required: true
+        default: ''
+      app_id:
+        description: '应用ID(仅限英文字母、数字和下划线)'
+        required: true
+        default: ''
+      core_name:
+        description: '核心名称(Core程序名称，仅限英文字母、数字和下划线)'
+        required: true
+        default: ''
+      display_name:
+        description: '显示名称(支持中文)'
+        required: true
+        default: ''
+      icon_url:
+        description: '应用图标URL'
+        required: true
+        default: ''
+      identifier:
+        description: '应用id识别码'
+        required: true
+        default: ''
+      version:
+        description: '版本号'
+        required: true
+        default: '2.0.1'
+      test_url:
+        description: '测速URL'
+        required: true
+        default: 'http://cp.cloudflare.com/generate_204'
+
+jobs:
+  build-linux-arm64:
+    # 使用 ARM 架构的 runner（GitHub Actions 的 ARM runner）
+    runs-on: ubuntu-24.04-arm
+    
+    steps:
+      # ============================================
+      # 步骤 1: 检出私有仓库代码
+      # ============================================
+      - name: 检出私有仓库代码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ env.PRIVATE_REPO_REF }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          submodules: recursive
+          
+      # ============================================
+      # 步骤 2: 获取应用图标
+      # ============================================
+      - name: 获取应用图标
+        run: |
+          mkdir -p temp_icons
+          curl -L ${{ github.event.inputs.icon_url }} -o temp_icons/app_icon.png
+
+      # ============================================
+      # 步骤 3: 修改配置 URLs
+      # ============================================
+      - name: 修改配置URLs
+        run: |
+          CONFIG_FILE="lib/common/config_service.dart"
+          CONFIG_URLS="${{ github.event.inputs.config_urls }}"
+          
+          # 分割URL列表
+          IFS=',' read -ra URL_ARRAY <<< "$CONFIG_URLS"
+          
+          # 建立临时文件
+          TEMP_FILE=$(mktemp)
+          
+          # 处理文件内容，行进行处理
+          FOUND_START=0
+          FOUND_END=0
+          
+          while IFS= read -r line; do
+            # 检测配置数组开始行
+            if [[ $line =~ "static const List<String> _configUrls = [" ]]; then
+              echo "$line" >> $TEMP_FILE
+              FOUND_START=1
+              
+              # 输出URL列表
+              for ((i=0; i<${#URL_ARRAY[@]}; i++)); do
+                URL=$(echo "${URL_ARRAY[i]}" | xargs)  # 去除空白字符
+                if [ $i -lt $((${#URL_ARRAY[@]}-1)) ]; then
+                  echo "    '$URL'," >> $TEMP_FILE
+                else
+                  echo "    '$URL'" >> $TEMP_FILE
+                fi
+              done
+              
+              # 跳过原来的URL内容，直到找到结束符
+              while IFS= read -r skip_line; do
+                if [[ $skip_line =~ "  ];" ]]; then
+                  FOUND_END=1
+                  echo "$skip_line" >> $TEMP_FILE
+                  break
+                fi
+              done
+              
+              # 如果没找到结束符，继续处理下一行
+              if [ $FOUND_END -eq 0 ]; then
+                continue
+              fi
+            elif [ $FOUND_START -eq 1 ] && [ $FOUND_END -eq 0 ]; then
+              # 跳过原始URL列表中的行
+              continue
+            else
+              # 复制其他行
+              echo "$line" >> $TEMP_FILE
+            fi
+          done < "$CONFIG_FILE"
+          
+          # 如果文件被成功处理，则替换原始文件
+          if [ $FOUND_START -eq 1 ] && [ $FOUND_END -eq 1 ]; then
+            cat $TEMP_FILE > $CONFIG_FILE
+            echo "已成功修改配置URLs"
+          else
+            echo "警告：未找到配置URL数组，请检查文件格式"
+            cat $CONFIG_FILE | grep -A 10 "_configUrls"
+          fi
+          
+          # 清理临时文件
+          rm -f $TEMP_FILE
+          
+          # 检查修改结果
+          echo "修改后的配置:"
+          grep -A 10 "_configUrls" $CONFIG_FILE
+
+      # ============================================
+      # 步骤 4: 修改更新URL
+      # ============================================
+      - name: 修改更新URL
+        run: |
+          API_FILE="lib/common/api_service.dart"
+          UPDATE_URL="${{ github.event.inputs.update_url }}"
+          
+          # 替换更新URL
+          if [ -f "$API_FILE" ]; then
+            sed -i "s|final customUpdateUrl = \"[^\"]*\";|final customUpdateUrl = \"$UPDATE_URL\";|" $API_FILE
+            echo "已修改更新URL:"
+            grep "customUpdateUrl" $API_FILE
+          else
+            echo "警告: API文件 $API_FILE 不存在，跳过更新URL修改"
+          fi
+      
+      # ============================================
+      # 步骤 5: 替换测速URL
+      # ============================================
+      - name: 替换测速URL defaultTestUrl
+        run: |
+          TEST_URL="${{ github.event.inputs.test_url }}"
+          CONSTANT_FILE="lib/common/constant.dart"
+          
+          if [ -f "$CONSTANT_FILE" ]; then
+            # 转义特殊字符以便在sed中使用
+            ESCAPED_URL=$(echo "$TEST_URL" | sed 's/[&/\]/\\&/g')
+            
+            # 替换测速URL
+            sed -i "s|const defaultTestUrl = \"[^\"]*\";|const defaultTestUrl = \"$ESCAPED_URL\";|" "$CONSTANT_FILE"
+            
+            echo "已修改测速URL为: $TEST_URL"
+            grep 'defaultTestUrl' "$CONSTANT_FILE"
+          else
+            echo "未找到 $CONSTANT_FILE"
+          fi
+
+      # ============================================
+      # 步骤 6: 修改 distribute_options.yaml 中的应用名称
+      # ============================================
+      - name: 修改 distribute_options.yaml 中的应用名称
+        run: |
+          DISPLAY_NAME="${{ github.event.inputs.display_name }}"
+          DISTRIBUTE_FILE="distribute_options.yaml"
+          
+          if [ -f "$DISTRIBUTE_FILE" ]; then
+            # 修改 app_name 属性
+            sed -i "s/app_name: 'FlClash'/app_name: '$DISPLAY_NAME'/" $DISTRIBUTE_FILE
+            sed -i "s/app_name: \"FlClash\"/app_name: \"$DISPLAY_NAME\"/" $DISTRIBUTE_FILE
+            
+            echo "已修改 distribute_options.yaml 中的应用名称为: $DISPLAY_NAME"
+          else
+            echo "警告: 找不到 distribute_options.yaml 文件"
+          fi
+
+      # ============================================
+      # 步骤 7: 修改Linux包配置 (ARM64)
+      # ============================================
+      - name: 修改Linux包配置
+        run: |
+          DISPLAY_NAME="${{ github.event.inputs.display_name }}"
+          APP_ID="${{ github.event.inputs.app_id }}"
+          
+          # 更新AppImage配置
+          APPIMAGE_CONFIG="linux/packaging/appimage/make_config.yaml"
+          if [ -f "$APPIMAGE_CONFIG" ]; then
+            sed -i "s/display_name: .*/display_name: \"$DISPLAY_NAME\"/" $APPIMAGE_CONFIG
+            echo "已更新AppImage显示名称为: $DISPLAY_NAME"
+          fi
+          
+          # 更新DEB配置
+          DEB_CONFIG="linux/packaging/deb/make_config.yaml"
+          if [ -f "$DEB_CONFIG" ]; then
+            sed -i "s/display_name: .*/display_name: \"$DISPLAY_NAME\"/" $DEB_CONFIG
+            sed -i "s/package_name: .*/package_name: \"$APP_ID\"/" $DEB_CONFIG
+            echo "已更新DEB包配置"
+          fi
+          
+          # 更新RPM配置
+          RPM_CONFIG="linux/packaging/rpm/make_config.yaml"
+          if [ -f "$RPM_CONFIG" ]; then
+            sed -i "s/display_name: .*/display_name: \"$DISPLAY_NAME\"/" $RPM_CONFIG
+            echo "已更新RPM包配置"
+          fi
+          
+          # 更新CMakeLists.txt
+          CMAKE_FILE="linux/CMakeLists.txt"
+          if [ -f "$CMAKE_FILE" ]; then
+            sed -i "s/set(BINARY_NAME \"FlClash\")/set(BINARY_NAME \"$APP_ID\")/" $CMAKE_FILE
+            echo "已更新CMakeLists.txt中的二进制名称"
+          fi
+          
+          # 修改版本号
+          BUILD_NUMBER=$(date +%Y%m%d%H)
+          VERSION="${{ github.event.inputs.version }}"
+          # 使用 -E 标志启用扩展正则表达式，并匹配可选的 build number
+          sed -i -E "s/version: [0-9]+\.[0-9]+\.[0-9]+(\+[0-9]+)?/version: $VERSION+$BUILD_NUMBER/" pubspec.yaml
+          
+          echo "已更新版本号为: $VERSION+$BUILD_NUMBER"
+          grep "version:" pubspec.yaml
+
+      # ============================================
+      # 步骤 8: 替换应用图标
+      # ============================================
+      - name: 替换应用图标
+        run: |
+          # 安装ImageMagick
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+          
+          # 创建合适大小的图标
+          mkdir -p assets/images
+          convert temp_icons/app_icon.png -resize 550x550 assets/images/icon.png
+          
+          # 复制到Linux资源目录
+          mkdir -p linux/assets
+          convert temp_icons/app_icon.png -resize 256x256 linux/assets/icon.png
+          
+          # 为DEB和RPM包准备图标
+          mkdir -p linux/packaging/deb/assets
+          mkdir -p linux/packaging/rpm/assets
+          mkdir -p linux/packaging/appimage/assets
+          
+          convert temp_icons/app_icon.png -resize 256x256 linux/packaging/deb/assets/icon.png
+          convert temp_icons/app_icon.png -resize 256x256 linux/packaging/rpm/assets/icon.png
+          convert temp_icons/app_icon.png -resize 256x256 linux/packaging/appimage/assets/icon.png
+          
+          echo "已替换Linux应用图标"
+
+      # ============================================
+      # 步骤 9: 修改登录页面应用名称
+      # ============================================
+      - name: 修改登录页面应用名称
+        run: |
+          # 读取 login_page.dart 文件
+          LOGIN_PAGE_FILE="lib/pages/login_page.dart"
+          DISPLAY_NAME="${{ github.event.inputs.display_name }}"
+          
+          # 替换文本 'OpenClash' 为动态的显示名称
+          sed -i "s/'OpenClash'/'$DISPLAY_NAME'/" $LOGIN_PAGE_FILE
+          sed -i "s/'© \${DateTime\.now()\.year} OpenClash\. 保留所有权利。'/'© \${DateTime.now().year} $DISPLAY_NAME. 保留所有权利。'/" $LOGIN_PAGE_FILE
+          
+          echo "已将登录页面的应用名称从 OpenClash 更改为 '$DISPLAY_NAME'"
+
+      # ============================================
+      # 步骤 10: 设置 Go 环境
+      # ============================================
+      - name: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+          cache-dependency-path: |
+            core/go.sum
+
+      # ============================================
+      # 步骤 11: 设置 Flutter 环境 (ARM64 使用 Master 通道)
+      # ============================================
+      - name: 设置 Flutter Master 环境 (ARM64)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: master  # ARM64 必须使用 master 通道
+          cache: true
+
+      # ============================================
+      # 步骤 12: 修改常量和标识符
+      # ============================================
+      - name: 修改常量和标识符
+        run: |
+          CORE_NAME="${{ github.event.inputs.core_name }}"
+          DISPLAY_NAME="${{ github.event.inputs.display_name }}"
+          CONSTANT_FILE="lib/common/constant.dart"
+          
+          # 修改 constant.dart 文件
+          if [ -f "$CONSTANT_FILE" ]; then
+            echo "修改 constant.dart 中的应用标识符..."
+            
+            # 备份原始文件
+            cp "$CONSTANT_FILE" "${CONSTANT_FILE}.backup"
+            
+            # 修改 appName 常量（单引号）
+            sed -i "s|const appName = '[^']*';|const appName = '$DISPLAY_NAME';|g" "$CONSTANT_FILE"
+            
+            # 修改 Unix Socket 路径中的 FlClashSocket_
+            sed -i "s|FlClashSocket_|${CORE_NAME}Socket_|g" "$CONSTANT_FILE"
+            
+            # 修改 Isolate 名称
+            sed -i "s|FlClashMainIsolate|${CORE_NAME}MainIsolate|g" "$CONSTANT_FILE"
+            sed -i "s|FlClashServiceIsolate|${CORE_NAME}ServiceIsolate|g" "$CONSTANT_FILE"
+            
+            # 显示修改前的原始内容（用于调试）
+            echo "修改前的关键内容:"
+            grep -E "(appName|Socket_|Isolate)" "$CONSTANT_FILE" || echo "未找到相关内容"
+            
+            echo "已修改以下标识符:"
+            echo "- appName: FlClash -> $DISPLAY_NAME"
+            echo "- Unix Socket: FlClashSocket_ -> ${CORE_NAME}Socket_"
+            echo "- Main Isolate: FlClashMainIsolate -> ${CORE_NAME}MainIsolate"
+            echo "- Service Isolate: FlClashServiceIsolate -> ${CORE_NAME}ServiceIsolate"
+            
+            # 验证修改 - 使用更宽松的验证条件
+            echo "验证修改结果..."
+            
+            # 检查 appName 修改
+            if grep -q "const appName = '$DISPLAY_NAME'" "$CONSTANT_FILE"; then
+              echo "✓ appName 修改成功"
+            else
+              echo "✗ appName 修改失败"
+              echo "当前 appName 内容:"
+              grep "const appName" "$CONSTANT_FILE" || echo "未找到 appName"
+            fi
+            
+            # 检查 Socket 修改
+            if grep -q "${CORE_NAME}Socket_" "$CONSTANT_FILE"; then
+              echo "✓ Socket 名称修改成功"
+            else
+              echo "✗ Socket 名称修改失败"
+              echo "当前 Socket 内容:"
+              grep "Socket_" "$CONSTANT_FILE" || echo "未找到 Socket"
+            fi
+            
+            # 检查 Isolate 修改
+            if grep -q "${CORE_NAME}MainIsolate" "$CONSTANT_FILE"; then
+              echo "✓ MainIsolate 修改成功"
+            else
+              echo "✗ MainIsolate 修改失败"
+              echo "当前 Isolate 内容:"
+              grep "Isolate" "$CONSTANT_FILE" || echo "未找到 Isolate"
+            fi
+            
+            # 检查 ServiceIsolate 修改
+            if grep -q "${CORE_NAME}ServiceIsolate" "$CONSTANT_FILE"; then
+              echo "✓ ServiceIsolate 修改成功"
+            else
+              echo "✗ ServiceIsolate 修改失败"
+            fi
+            
+            # 显示修改后的关键内容
+            echo "修改后的关键内容:"
+            grep -E "(appName|Socket_|Isolate)" "$CONSTANT_FILE" || echo "未找到相关内容"
+            
+            # 如果至少 appName 修改成功，就认为成功
+            if grep -q "const appName = '$DISPLAY_NAME'" "$CONSTANT_FILE"; then
+              echo "✓ constant.dart 主要修改成功"
+              rm -f "${CONSTANT_FILE}.backup"
+            else
+              echo "✗ constant.dart 修改失败，恢复原文件"
+              mv "${CONSTANT_FILE}.backup" "$CONSTANT_FILE"
+              exit 1
+            fi
+          else
+            echo "警告: 找不到 constant.dart 文件"
+          fi
+
+      # ============================================
+      # 步骤 13: 修改 setup.dart 中的应用名称
+      # ============================================
+      - name: 修改 setup.dart 中的应用名称
+        run: |
+          # 获取自定义核心名称，提取应用名称部分（去掉Core后缀）
+          CORE_NAME="${{ github.event.inputs.core_name }}"
+          # 如果用户输入的是带Core的名称，去掉Core后缀；否则直接使用
+          if [[ "$CORE_NAME" == *"Core" ]]; then
+            APP_NAME="${CORE_NAME%Core}"
+          else
+            APP_NAME="$CORE_NAME"
+          fi
+          
+          SETUP_FILE="setup.dart"
+          
+          # 只有当应用名称不是默认值时才修改
+          if [ "$APP_NAME" != "FlClash" ]; then
+            echo "修改 setup.dart 中的应用名称为: ${APP_NAME}"
+            echo "这将自动使 coreName 变为: ${APP_NAME}Core"
+            
+            # 备份原始文件
+            cp "$SETUP_FILE" "${SETUP_FILE}.backup"
+            
+            # 修改 appName getter，这样 coreName 会自动变成 ${APP_NAME}Core
+            sed -i "s/static String get appName => 'FlClash';/static String get appName => '${APP_NAME}';/" "$SETUP_FILE"
+            
+            # 验证修改是否成功
+            if grep -q "static String get appName => '${APP_NAME}';" "$SETUP_FILE"; then
+              echo "✓ setup.dart 应用名称修改成功"
+              echo "修改后的 appName getter:"
+              grep "static String get appName" "$SETUP_FILE"
+              echo "coreName 将自动变为: ${APP_NAME}Core"
+            else
+              echo "✗ setup.dart 应用名称修改失败，恢复原文件"
+              echo "当前 appName getter 内容:"
+              grep "static String get appName" "$SETUP_FILE" || echo "未找到 appName getter"
+              mv "${SETUP_FILE}.backup" "$SETUP_FILE"
+              exit 1
+            fi
+          else
+            echo "使用默认应用名称 FlClash，跳过 setup.dart 修改"
+          fi
+
+      # ============================================
+      # 步骤 14: 修改核心路径和锁文件引用
+      # ============================================
+      - name: 修改核心路径和锁文件引用
+        run: |
+          # 获取参数（与setup.dart和CMakeLists.txt保持一致的逻辑）
+          CORE_NAME="${{ github.event.inputs.core_name }}"
+          
+          # 如果用户输入的是带Core的名称，去掉Core后缀；否则直接使用
+          if [[ "$CORE_NAME" == *"Core" ]]; then
+            APP_NAME="${CORE_NAME%Core}"
+          else
+            APP_NAME="$CORE_NAME"
+          fi
+          
+          # 自动生成核心名称（与setup.dart的coreName逻辑一致）
+          FINAL_CORE_NAME="${APP_NAME}Core"
+          
+          PATH_FILE="lib/common/path.dart"
+          
+          if [ -f "$PATH_FILE" ]; then
+            # 备份原始文件
+            cp "$PATH_FILE" "${PATH_FILE}.backup"
+            
+            echo "修改核心路径引用和锁文件名称..."
+            echo "应用名称: ${APP_NAME}"
+            echo "核心名称: ${FINAL_CORE_NAME}"
+            
+            # 显示修改前的文件内容
+            echo "修改前的文件内容:"
+            grep -E "(FlClashCore|FlClash\.lock)" "$PATH_FILE" || echo "未找到相关内容"
+            
+            # 修改核心路径 - 匹配实际的文件内容（单引号）
+            sed -i "s|'FlClashCore\$executableExtension'|'${FINAL_CORE_NAME}\$executableExtension'|g" "$PATH_FILE"
+            # 修改锁文件名称 - 匹配实际的文件内容（单引号）
+            sed -i "s|'FlClash\.lock'|'${APP_NAME}.lock'|g" "$PATH_FILE"
+            
+            echo "已更新核心路径引用为 ${FINAL_CORE_NAME}"
+            echo "已更新锁文件名称引用为 ${APP_NAME}.lock"
+            
+            # 显示修改后的文件内容
+            echo "修改后的文件内容:"
+            grep -E "(${FINAL_CORE_NAME}|${APP_NAME}\.lock)" "$PATH_FILE" || echo "未找到相关内容"
+            
+            # 验证修改结果
+            if grep -q "${FINAL_CORE_NAME}" "$PATH_FILE" && grep -q "${APP_NAME}\.lock" "$PATH_FILE"; then
+              echo "✓ 核心路径和锁文件名修改成功"
+              rm -f "${PATH_FILE}.backup"
+            else  
+              echo "✗ 修改失败，恢复备份"
+              mv "${PATH_FILE}.backup" "$PATH_FILE"
+              exit 1
+            fi
+          else
+            echo "警告: 找不到 path.dart 文件: $PATH_FILE"
+          fi
+
+      # ============================================
+      # 步骤 15: 修改应用窗口标题和托盘名称
+      # ============================================
+      - name: 修改应用窗口标题和托盘名称
+        run: |
+          DISPLAY_NAME="${{ github.event.inputs.display_name }}"
+          
+          # 1. 修改窗口标题栏组件
+          WINDOW_MANAGER_FILE="lib/manager/window_manager.dart"
+          if [ -f "$WINDOW_MANAGER_FILE" ]; then
+            # 修改 const Text(appName) 或 Text(appName,) 为自定义显示名称
+            sed -i "s/const Text(appName)/const Text(\"$DISPLAY_NAME\")/" $WINDOW_MANAGER_FILE
+            sed -i "s/Text(appName,/Text(\"$DISPLAY_NAME\",/" $WINDOW_MANAGER_FILE
+            echo "已修改窗口标题栏文本为: $DISPLAY_NAME"
+          fi
+          
+          # 2. 修改原生窗口标题
+          MAIN_CC_FILE="linux/my_application.cc"
+          if [ -f "$MAIN_CC_FILE" ]; then
+            sed -i "s/gtk_window_set_title(window, \"FlClash\")/gtk_window_set_title(window, \"$DISPLAY_NAME\")/" $MAIN_CC_FILE
+            echo "已修改Linux原生窗口标题"
+          fi
+          
+          # 3. 修改托盘提示文本
+          TRAY_FILE="lib/common/tray.dart"
+          if [ -f "$TRAY_FILE" ]; then
+            # 使用 [[:space:]]* 来匹配空白字符（兼容 sed）
+            sed -i "s/trayManager\.setToolTip([[:space:]]*appName,/trayManager.setToolTip(\"$DISPLAY_NAME\",/" $TRAY_FILE
+            echo "已修改托盘提示文本为: $DISPLAY_NAME"
+          fi
+          
+          # 4. 修改应用标题
+          APPLICATION_FILE="lib/application.dart"
+          if [ -f "$APPLICATION_FILE" ]; then
+            sed -i "s/title: appName,/title: \"$DISPLAY_NAME\",/" $APPLICATION_FILE
+            echo "已修改应用标题为: $DISPLAY_NAME"
+          fi
+
+      # ============================================
+      # 步骤 16: 修改CMakeLists.txt中的核心文件名
+      # ============================================
+      - name: 修改CMakeLists.txt中的核心文件名
+        run: |
+          # 获取应用名称（与setup.dart修改保持一致）
+          CORE_NAME="${{ github.event.inputs.core_name }}"
+          # 如果用户输入的是带Core的名称，去掉Core后缀；否则直接使用
+          if [[ "$CORE_NAME" == *"Core" ]]; then
+            APP_NAME="${CORE_NAME%Core}"
+          else
+            APP_NAME="$CORE_NAME"
+          fi
+          
+          # 自动生成核心名称（与setup.dart的coreName逻辑一致）
+          FINAL_CORE_NAME="${APP_NAME}Core"
+          
+          CMAKE_FILE="linux/CMakeLists.txt"
+          
+          if [ -f "$CMAKE_FILE" ]; then
+            # 备份原始文件
+            cp "$CMAKE_FILE" "${CMAKE_FILE}.backup"
+            
+            echo "修改CMakeLists.txt中的核心文件名为: ${FINAL_CORE_NAME}"
+            echo "基于应用名称: ${APP_NAME} 自动添加Core后缀"
+            
+            # 修改CMakeLists.txt中的FlClashCore为自定义核心名称
+            sed -i "s|FlClashCore|${FINAL_CORE_NAME}|g" "$CMAKE_FILE"
+            
+            echo "已更新CMakeLists.txt中的核心文件名引用为 ${FINAL_CORE_NAME}"
+            
+            # 验证修改结果
+            if grep -q "${FINAL_CORE_NAME}" "$CMAKE_FILE"; then
+              echo "✓ CMakeLists.txt 核心文件名修改成功"
+              rm -f "${CMAKE_FILE}.backup"
+            else
+              echo "✗ CMakeLists.txt 核心文件名修改失败，恢复备份"
+              mv "${CMAKE_FILE}.backup" "$CMAKE_FILE"
+              exit 1
+            fi
+          else
+            echo "警告: 找不到 CMakeLists.txt 文件: $CMAKE_FILE"
+          fi
+
+      # ============================================
+      # 步骤 17: 获取 Flutter 依赖
+      # ============================================
+      - name: 获取 Flutter 依赖
+        run: flutter pub get
+
+      # ============================================
+      # 步骤 18: 构建 Linux ARM64 应用
+      # ============================================
+      - name: 构建 Linux ARM64 应用
+        run: |
+          echo "开始构建 Linux ARM64 架构..."
+          dart setup.dart linux --arch arm64 --env stable
+          echo "构建完成！"
+
+      # ============================================
+      # 步骤 19: 显示构建产物
+      # ============================================
+      - name: 显示构建产物
+        run: |
+          echo "构建产物列表:"
+          ls -lh dist/
+          
+          echo ""
+          echo "ARM64 架构标识:"
+          file dist/* || true
+
+      # ============================================
+      # 步骤 20: 上传构建产物
+      # ============================================
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.app_id }}-${{ github.event.inputs.version }}-linux-arm64
+          path: dist/
+          retention-days: 7
+          
+      # ============================================
+      # 步骤 21: 生成构建总结
+      # ============================================
+      - name: 生成构建总结
+        run: |
+          echo "## 🎉 Linux ARM64 构建完成" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 构建信息" >> $GITHUB_STEP_SUMMARY
+          echo "- **应用名称**: ${{ github.event.inputs.display_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **应用ID**: ${{ github.event.inputs.app_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **版本号**: ${{ github.event.inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **架构**: ARM64" >> $GITHUB_STEP_SUMMARY
+          echo "- **私有仓库**: ${{ env.PRIVATE_REPO }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **分支/标签**: ${{ env.PRIVATE_REPO_REF }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 构建产物" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lh dist/ >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
