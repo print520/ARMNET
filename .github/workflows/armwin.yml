@@ -722,26 +722,3 @@ jobs:
           echo '```' >> $env:GITHUB_STEP_SUMMARY
         shell: pwsh
 
-  # ============================================
-  # 上传到 R2 存储 (可选)
-  # ============================================
-  upload-to-r2:
-    needs: build-windows-arm64
-    uses: ./.github/workflows/upload_to_r2.yml
-    with:
-      version: ${{ github.event.inputs.version }}
-      app_id: ${{ github.event.inputs.app_id }}
-      display_name: ${{ github.event.inputs.display_name }}
-      config_urls: ${{ github.event.inputs.config_urls }}
-      update_url: ${{ github.event.inputs.update_url }}
-      icon_url: ${{ github.event.inputs.icon_url }}
-      identifier: ${{ github.event.inputs.identifier }}
-      platform: windows-arm64
-    secrets:
-      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      CF_R2_BUCKET_NAME: ${{ secrets.CF_R2_BUCKET_NAME }}
-      CF_R2_PUBLIC_URL: ${{ secrets.CF_R2_PUBLIC_URL }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
