@@ -261,26 +261,53 @@ jobs:
         shell: pwsh
 
       # ============================================
-      # 步骤 10: 替换图标 - Windows
+      # 步骤 10: 替换图标 - Windows (使用 Python Pillow)
       # ============================================
       - name: 替换图标 - Windows
         run: |
-          # 安装ImageMagick (如果已安装则跳过)
-          choco install imagemagick -y --ignore-checksums
+          # 安装 Pillow 库（更可靠的图像处理方案）
+          python -m pip install --upgrade pip
+          pip install Pillow
           
-          # 转换为ICO格式
-          magick temp_icons/app_icon.png -resize 256x256 windows/runner/resources/app_icon.ico
+          # 创建 Python 脚本来处理图标转换
+          @"
+          from PIL import Image
+          import os
           
-          # 检查目录是否存在后再创建
-          if (!(Test-Path "assets/images")) {
-            New-Item -Path "assets/images" -ItemType Directory -Force
-          }
+          # 读取源图标
+          icon = Image.open('temp_icons/app_icon.png')
           
-          # 替换assets目录中的应用图标
-          magick temp_icons/app_icon.png -resize 550x550 assets/images/icon.png
-          magick temp_icons/app_icon.png -resize 256x256 assets/images/icon.ico
+          # 转换为 RGBA 模式（如果需要）
+          if icon.mode != 'RGBA':
+              icon = icon.convert('RGBA')
           
-          Write-Host "已复制图标到assets目录"
+          # 1. 转换为 ICO 格式 (256x256) - Windows runner 图标
+          icon_256 = icon.resize((256, 256), Image.Resampling.LANCZOS)
+          icon_256.save('windows/runner/resources/app_icon.ico', format='ICO', sizes=[(256, 256)])
+          print('✓ 已生成 windows/runner/resources/app_icon.ico')
+          
+          # 2. 创建 assets/images 目录
+          os.makedirs('assets/images', exist_ok=True)
+          
+          # 3. 生成 550x550 PNG (assets 目录)
+          icon_550 = icon.resize((550, 550), Image.Resampling.LANCZOS)
+          icon_550.save('assets/images/icon.png', format='PNG')
+          print('✓ 已生成 assets/images/icon.png')
+          
+          # 4. 生成 256x256 ICO (assets 目录)
+          icon_256.save('assets/images/icon.ico', format='ICO', sizes=[(256, 256)])
+          print('✓ 已生成 assets/images/icon.ico')
+          
+          print('✓ 所有图标转换完成！')
+          "@ | Out-File -FilePath convert_icon.py -Encoding UTF8
+          
+          # 执行 Python 脚本
+          python convert_icon.py
+          
+          # 清理临时脚本
+          Remove-Item convert_icon.py
+          
+          Write-Host "已成功替换所有图标" -ForegroundColor Green
         shell: pwsh
         
       # ============================================
