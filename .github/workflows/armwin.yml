@@ -1,0 +1,747 @@
+name: Windows ARM64 构建 (公开仓库版本)
+
+# 这个文件应该放在公开仓库中
+# 它会拉取私有仓库的代码进行 Windows ARM 架构构建
+
+# ============================================
+# 配置私有仓库信息（在这里修改）
+# ============================================
+env:
+  PRIVATE_REPO: 'print520/NetAPP'  # 修改为你的私有仓库地址 (格式: owner/repo)
+  PRIVATE_REPO_REF: 'main'         # 修改为你要构建的分支/标签/commit
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_urls:
+        description: '配置URL列表（以逗号分隔）'
+        required: true
+        default: ''
+      update_url:
+        description: '更新检查URL'
+        required: true
+        default: ''
+      app_id:
+        description: '应用ID(仅限英文字母、数字和下划线)'
+        required: true
+        default: ''
+      display_name:
+        description: '显示名称(支持中文)'
+        required: true
+        default: ''
+      icon_url:
+        description: '应用图标URL'
+        required: true
+        default: ''
+      identifier:
+        description: '应用id识别码'
+        required: true
+        default: ''
+      version:
+        description: '版本号'
+        required: true
+        default: '2.0.1'
+      test_url:
+        description: '测速URL'
+        required: true
+        default: 'http://cp.cloudflare.com/generate_204'
+
+jobs:
+  build-windows-arm64:
+    # 使用 Windows ARM 架构的 runner
+    runs-on: windows-11-arm
+    
+    steps:
+      # ============================================
+      # 步骤 1: 检出私有仓库代码
+      # ============================================
+      - name: 检出私有仓库代码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ env.PRIVATE_REPO_REF }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          submodules: recursive
+      
+      # ============================================
+      # 步骤 2: 设置 Rust 环境 (Windows ARM 需要)
+      # ============================================
+      - name: 设置 Rust 环境
+        run: |
+          Invoke-WebRequest -Uri "https://win.rustup.rs/aarch64" -OutFile rustup-init.exe
+          .\rustup-init.exe -y --default-toolchain stable
+          $cargoPath = "$env:USERPROFILE\.cargo\bin"
+          Add-Content $env:GITHUB_PATH $cargoPath
+        shell: pwsh
+
+      # ============================================
+      # 步骤 3: 获取应用图标
+      # ============================================
+      - name: 获取应用图标
+        run: |
+          mkdir -p temp_icons
+          curl -L ${{ github.event.inputs.icon_url }} -o temp_icons/app_icon.png
+        shell: bash
+
+      # ============================================
+      # 步骤 4: 修改配置URLs
+      # ============================================
+      - name: 修改配置URLs
+        run: |
+          $configFile = "lib/common/config_service.dart"
+          $configUrls = "${{ github.event.inputs.config_urls }}" -split ","
+          
+          # 读取原始文件内容
+          $content = Get-Content $configFile -Raw
+          
+          # 构建新的URLs数组字符串
+          $newUrls = "["
+          for ($i = 0; $i -lt $configUrls.Count; $i++) {
+            $url = $configUrls[$i].Trim()
+            $newUrls += "`n    '$url'"
+            if ($i -lt ($configUrls.Count - 1)) {
+              $newUrls += ","
+            }
+          }
+          $newUrls += "`n  ]"
+          
+          # 使用精确匹配模式替换
+          $pattern = "static const List<String> _configUrls = \[[^\]]*\];"
+          $replacement = "static const List<String> _configUrls = $newUrls;"
+          
+          # 使用正则表达式替换
+          $content = [regex]::Replace($content, $pattern, $replacement)
+          
+          # 写回文件
+          $content | Set-Content $configFile -Force -Encoding UTF8
+          
+          # 确认修改
+          Write-Host "已修改配置URLs:"
+          Get-Content $configFile | Select-String -Context 0,5 "_configUrls"
+        shell: pwsh
+
+      # ============================================
+      # 步骤 5: 修改更新URL
+      # ============================================
+      - name: 修改更新URL
+        run: |
+          $apiFile = "lib/common/api_service.dart"
+          $updateUrl = "${{ github.event.inputs.update_url }}"
+          
+          # 替换更新URL
+          if (Test-Path $apiFile) {
+            (Get-Content $apiFile) -replace "final customUpdateUrl = `"[^`"]+`";", "final customUpdateUrl = `"$updateUrl`";" | Set-Content $apiFile
+            Write-Host "已修改更新URL:"
+            Get-Content $apiFile | Select-String "customUpdateUrl"
+          } else {
+            Write-Host "警告: API文件 $apiFile 不存在，跳过更新URL修改"
+          }
+        shell: pwsh
+
+      # ============================================
+      # 步骤 6: 替换测速URL
+      # ============================================
+      - name: 替换测速URL defaultTestUrl
+        run: |
+          $testUrl = "${{ github.event.inputs.test_url }}"
+          $file = "lib/common/constant.dart"
+          if (Test-Path $file) {
+            (Get-Content $file -Raw) -replace "const defaultTestUrl = '[^']*';", "const defaultTestUrl = '$testUrl';" | Set-Content $file -Encoding UTF8
+            Get-Content $file | Select-String 'defaultTestUrl'
+          } else {
+            Write-Host "未找到 $file"
+          }
+        shell: pwsh
+
+      # ============================================
+      # 步骤 7: 修改 distribute_options.yaml 中的应用名称
+      # ============================================
+      - name: 修改 distribute_options.yaml 中的应用名称
+        run: |
+          $displayName = "${{ github.event.inputs.display_name }}"
+          $distributeFile = "distribute_options.yaml"
+          
+          if (Test-Path $distributeFile) {
+            # 读取文件内容
+            $content = Get-Content $distributeFile -Raw
+            
+            # 修改 app_name 属性
+            $content = $content -replace "app_name: 'FlClash'", "app_name: '$displayName'"
+            $content = $content -replace "app_name: `"FlClash`"", "app_name: `"$displayName`""
+            
+            # 写回文件
+            $content | Set-Content $distributeFile -Force
+            
+            Write-Host "已修改 distribute_options.yaml 中的应用名称为: $displayName"
+          } else {
+            Write-Host "警告: 找不到 distribute_options.yaml 文件"
+          }
+        shell: pwsh
+
+      # ============================================
+      # 步骤 8: 修改显示名称和版本
+      # ============================================
+      - name: 修改显示名称和版本
+        run: |
+          # 使用输入的显示名称
+          $displayName = "${{ github.event.inputs.display_name }}"
+          $app_id = "${{ github.event.inputs.app_id }}"
+          $identifier = "${{ github.event.inputs.identifier }}"
+          
+          # 修改Windows配置中的显示名称 - 仅修改display_name
+          if (Test-Path "windows/packaging/exe/make_config.yaml") {
+            # 读取文件内容
+            $content = Get-Content 'windows/packaging/exe/make_config.yaml' -Raw
+            
+            # 修改应用内部名称 显示名称 唯一识别id
+            $content = $content -replace "display_name: .*", "display_name: $displayName"
+            $content = $content -replace "app_name: .*", "app_name: $app_id"
+            $content = $content -replace "executable_name: .*", "executable_name: ${app_id}.exe"
+            $content = $content -replace "output_base_file_name: .*", "output_base_file_name: ${displayName}.exe"
+            $content = $content -replace "app_id: .*", "app_id: $identifier"
+            
+            # 添加或修改安装目录名称，使用英文app_id避免中文目录名
+            if ($content -match "install_dir_name:") {
+              $content = $content -replace "install_dir_name: .*", "install_dir_name: `"{autopf64}\\$app_id`""
+            } else {
+              $content += "`ninstall_dir_name: `"{autopf64}\\$app_id`""
+            }
+            
+            # 写回文件
+            $content | Set-Content 'windows/packaging/exe/make_config.yaml' -Force
+            
+            Write-Host "已更新Windows应用显示名称配置:"
+            Get-Content 'windows/packaging/exe/make_config.yaml'
+          }
+          
+          $cmake_file = "windows/CMakeLists.txt"
+          
+          # 精确替换FlClash为传入的app_id
+          (Get-Content $cmake_file) -replace 'set\(BINARY_NAME "FlClash"\)', "set(BINARY_NAME `"$app_id`")" | Set-Content $cmake_file
+          
+          # 替换核心文件的安装路径
+          $content = Get-Content $cmake_file -Raw
+          $content = $content -replace 'FlClashCore\.exe', "${app_id}Core.exe"
+          $content = $content -replace 'FlClashHelperService\.exe', "${app_id}HelperService.exe"
+          $content | Set-Content $cmake_file -Force
+          
+          Write-Host "已修改 CMakeLists.txt 中的所有文件名"
+        shell: pwsh
+
+      # ============================================
+      # 步骤 9: 修改版本号和应用名称
+      # ============================================
+      - name: 修改版本号和应用名称
+        run: |
+          # 使用输入的显示名称
+          $displayName = "${{ github.event.inputs.display_name }}"
+          $app_id = "${{ github.event.inputs.app_id }}"
+          $identifier = "${{ github.event.inputs.identifier }}"
+          
+          # 修改版本号
+          $version = "${{ github.event.inputs.version }}"
+          $buildNumber = Get-Date -Format "yyyyMMddHH"
+          # 匹配可选的 build number
+          (Get-Content pubspec.yaml) -replace "version: [0-9]+\.[0-9]+\.[0-9]+(\+[0-9]+)?", "version: $version+$buildNumber" | Set-Content pubspec.yaml
+          
+          # 修改 constant.dart 中的 appName（用于注册表键名和自启动）
+          $constantFile = "lib/common/constant.dart"
+          if (Test-Path $constantFile) {
+            # 使用 app_id 作为内部标识符（用于注册表等），避免使用中文
+            $content = Get-Content $constantFile -Raw
+            # 只支持单引号（代码中使用的格式）
+            $content = $content -replace "const appName = '[^']+';", "const appName = '$app_id';"
+            $content | Set-Content $constantFile -NoNewline
+            Write-Host "已更新 constant.dart 中的 appName 为: $app_id"
+            Get-Content $constantFile | Select-String -Pattern "const appName"
+          }
+          
+          # 查看修改后的文件
+          Get-Content pubspec.yaml | Select-String -Pattern "version:"
+        shell: pwsh
+
+      # ============================================
+      # 步骤 10: 替换图标 - Windows
+      # ============================================
+      - name: 替换图标 - Windows
+        run: |
+          # 安装ImageMagick (如果已安装则跳过)
+          choco install imagemagick -y --ignore-checksums
+          
+          # 转换为ICO格式
+          magick temp_icons/app_icon.png -resize 256x256 windows/runner/resources/app_icon.ico
+          
+          # 检查目录是否存在后再创建
+          if (!(Test-Path "assets/images")) {
+            New-Item -Path "assets/images" -ItemType Directory -Force
+          }
+          
+          # 替换assets目录中的应用图标
+          magick temp_icons/app_icon.png -resize 550x550 assets/images/icon.png
+          magick temp_icons/app_icon.png -resize 256x256 assets/images/icon.ico
+          
+          Write-Host "已复制图标到assets目录"
+        shell: pwsh
+        
+      # ============================================
+      # 步骤 11: 替换所有FlClash相关字符串
+      # ============================================
+      - name: 替换所有FlClash相关字符串
+        run: |
+          $app_id = "${{ github.event.inputs.app_id }}"
+          
+          # 1. 替换windows.rs中的服务名称 - 使用 regex::Escape 方法
+          $windowsRsFile = "services/helper/src/service/windows.rs"
+          if (Test-Path $windowsRsFile) {
+            $content = Get-Content $windowsRsFile -Raw
+            
+            # 使用 regex::Escape 确保特殊字符被正确处理
+            $serviceNamePattern = 'const SERVICE_NAME: &str = "FlClashHelperService";'
+            $serviceNameReplacement = "const SERVICE_NAME: &str = `"${app_id}HelperService`";"
+            $content = $content -replace [regex]::Escape($serviceNamePattern), $serviceNameReplacement
+            
+            $content | Set-Content $windowsRsFile -Force -Encoding UTF8
+            Write-Host "已替换 windows.rs 中的服务名称为: ${app_id}HelperService"
+          }
+          
+          # 2. 替换constant.dart中的相关常量
+          $constantDartFile = "lib/common/constant.dart"
+          if (Test-Path $constantDartFile) {
+            $content = Get-Content $constantDartFile -Raw
+            
+            # 替换appName常量（单引号）
+            $content = $content -replace [regex]::Escape("const appName = 'FlClash';"), "const appName = '$app_id';"
+            if ($content -match [regex]::Escape("const appHelperService = 'FlClashHelperService';")) {
+              $content = $content -replace [regex]::Escape("const appHelperService = 'FlClashHelperService';"), "const appHelperService = '${app_id}HelperService';"
+            }
+            # 如果有额外的appCoreName等常量，确保也替换它们
+            if ($content -match [regex]::Escape("const appCoreName = 'FlClashCore';")) {
+              $content = $content -replace [regex]::Escape("const appCoreName = 'FlClashCore';"), "const appCoreName = '${app_id}Core';"
+            }
+
+            if ($content -match [regex]::Escape("const appSocketPrefix = 'FlClashSocket_';")) {
+              $content = $content -replace [regex]::Escape("const appSocketPrefix = 'FlClashSocket_';"), "const appSocketPrefix = '${app_id}Socket_';"
+            }
+
+            
+            # 替换unixSocketPath中的FlClashSocket_ - 使用 regex::Escape 方法
+            $socketPattern = "final unixSocketPath = '/tmp/FlClashSocket_`${Random().nextInt(10000)}.sock';"
+            $socketReplacement = "final unixSocketPath = '/tmp/${app_id}Socket_`${Random().nextInt(10000)}.sock';"
+            $content = $content -replace [regex]::Escape($socketPattern), $socketReplacement
+            
+            # 替换mainIsolate名称 - 使用 regex::Escape 方法
+            $mainIsolatePattern = "final mainIsolate = 'FlClashMainIsolate';"
+            $mainIsolateReplacement = "final mainIsolate = '${app_id}MainIsolate';"
+            $content = $content -replace [regex]::Escape($mainIsolatePattern), $mainIsolateReplacement
+            
+            # 替换serviceIsolate名称 - 使用 regex::Escape 方法
+            $serviceIsolatePattern = "final serviceIsolate = 'FlClashServiceIsolate';"
+            $serviceIsolateReplacement = "final serviceIsolate = '${app_id}ServiceIsolate';"
+            $content = $content -replace [regex]::Escape($serviceIsolatePattern), $serviceIsolateReplacement
+            
+            # 写回文件
+            $content | Set-Content $constantDartFile -Force -Encoding UTF8
+            Write-Host "已替换 constant.dart 中的所有 FlClash 相关常量"
+          }
+          
+          # 3. 替换path.dart中的相关路径 - 使用简单直接的字符串替换
+          $pathDartFile = "lib/common/path.dart"
+          if (Test-Path $pathDartFile) {
+            $content = Get-Content $pathDartFile -Raw
+            
+            # 使用简单的字符串替换，避免复杂的正则表达式
+            $content = $content.Replace("'FlClash.lock'", "'$app_id.lock'")
+            $content = $content.Replace("'FlClashCore`$executableExtension'", "'${app_id}Core`$executableExtension'")
+            
+            # 写回文件
+            $content | Set-Content $pathDartFile -Force -Encoding UTF8
+            Write-Host "已替换 path.dart 中的所有 FlClash 相关路径"
+            
+            # 验证替换结果 - 显示具体内容
+            Write-Host "path.dart 中的关键行:"
+            Get-Content $pathDartFile | Select-String -Pattern "corePath|lockFilePath" -Context 1,1
+            
+            # 额外验证：检查是否还有 FlClash 字符串
+            $remainingFlClash = Get-Content $pathDartFile | Select-String -Pattern "FlClash"
+            if ($remainingFlClash) {
+              Write-Host "警告: path.dart 中仍有未替换的 FlClash 字符串:" -ForegroundColor Red
+              $remainingFlClash | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+            } else {
+              Write-Host "✓ path.dart 中所有 FlClash 字符串已成功替换" -ForegroundColor Green
+            }
+          }
+          
+          
+          # 4. 验证所有替换是否成功
+          Write-Host "`n========== 验证替换结果 ==========" -ForegroundColor Yellow
+          
+          # 验证 constant.dart
+          Write-Host "`n[constant.dart]" -ForegroundColor Cyan
+          Get-Content "lib/common/constant.dart" | Select-String -Pattern "const appName|const appHelperService"
+          
+          # 验证 path.dart
+          Write-Host "`n[path.dart]" -ForegroundColor Cyan
+          Get-Content "lib/common/path.dart" | Select-String -Pattern "FlClash"
+          
+          # 验证 windows.rs
+          Write-Host "`n[windows.rs]" -ForegroundColor Cyan
+          Get-Content "services/helper/src/service/windows.rs" | Select-String -Pattern "SERVICE_NAME"
+          
+          Write-Host "`n========== 验证完成 ==========" -ForegroundColor Yellow
+          Write-Host "所有FlClash相关字符串替换完成" -ForegroundColor Green
+        shell: pwsh
+
+      # ============================================
+      # 步骤 12: 修改登录页面所有 OpenClash 为显示名称
+      # ============================================
+      - name: 修改登录页面所有 OpenClash 为显示名称
+        run: |
+          $loginPageFile = "lib/pages/login_page.dart"
+          $displayName = "${{ github.event.inputs.display_name }}"
+          $content = Get-Content $loginPageFile -Raw
+
+          # 全局替换所有 OpenClash 为显示名称
+          $content = $content.Replace("OpenClash", $displayName)
+
+          # 写回文件
+          $content | Set-Content $loginPageFile -Force -Encoding UTF8
+
+          Write-Host "已将登录页面所有 OpenClash 替换为 '$displayName'"
+        shell: pwsh
+
+      # ============================================
+      # 步骤 13: 修复中文安装目录名称问题
+      # ============================================
+      - name: 修复中文安装目录名称问题
+        run: |
+          $displayName = "${{ github.event.inputs.display_name }}"
+          $app_id = "${{ github.event.inputs.app_id }}"
+          
+          # 1. 修改MakeExeConfig类，强制使用英文目录名
+          $makeExeConfigFile = "plugins/flutter_distributor/packages/flutter_app_packager/lib/src/makers/exe/make_exe_config.dart"
+          if (Test-Path $makeExeConfigFile) {
+            $content = Get-Content $makeExeConfigFile -Raw
+            
+            # 修改defaultInstallDirName方法，确保使用英文目录名
+            $oldPattern = "String get defaultInstallDirName => '\{autopf64\}\\\\\\$appName';"
+            $newPattern = "String get defaultInstallDirName => '{autopf64}\\\\' + appName.replaceAll(RegExp(r'[^a-zA-Z0-9_\\-]'), '_');"
+            
+            if ($content -match [regex]::Escape($oldPattern)) {
+              $content = $content -replace [regex]::Escape($oldPattern), $newPattern
+              Write-Host "已修改MakeExeConfig类，避免中文安装目录名" -ForegroundColor Green
+            }
+            
+            # 写回文件
+            $content | Set-Content $makeExeConfigFile -Force -Encoding UTF8
+          } else {
+            Write-Host "警告: 找不到 MakeExeConfig 文件，跳过修改" -ForegroundColor Yellow
+          }
+          
+          # 2. 确保make_config.yaml中明确指定英文安装目录名
+          $makeConfigFile = "windows/packaging/exe/make_config.yaml"
+          if (Test-Path $makeConfigFile) {
+            $content = Get-Content $makeConfigFile -Raw
+            
+            # 添加或修改安装目录名称配置
+            if ($content -match "install_dir_name:") {
+              $content = $content -replace "install_dir_name: .*", "install_dir_name: `"{autopf64}\\$app_id`""
+            } else {
+              $content += "`ninstall_dir_name: `"{autopf64}\\$app_id`""
+            }
+            
+            # 写回文件
+            $content | Set-Content $makeConfigFile -Force
+            
+            Write-Host "已在make_config.yaml中设置英文安装目录名: `"{autopf64}\\$app_id`"" -ForegroundColor Green
+          }
+          
+          Write-Host "中文安装目录名称问题修复完成" -ForegroundColor Green
+        shell: pwsh
+
+      # ============================================
+      # 步骤 14: 修改应用窗口标题和托盘名称
+      # ============================================
+      - name: 修改应用窗口标题和托盘名称
+        run: |
+          $displayName = "${{ github.event.inputs.display_name }}"
+          
+          # 1. 修改窗口标题栏组件
+          $windowManagerFile = "lib/manager/window_manager.dart"
+          if (Test-Path $windowManagerFile) {
+            $content = Get-Content $windowManagerFile -Raw
+            $content = $content -replace 'Text\(\s*appName,', "Text(`"$displayName`","
+            $content | Set-Content $windowManagerFile -Force -Encoding UTF8
+            Write-Host "已修改窗口标题栏文本为: $displayName"
+          }
+          
+          # 2. 修改原生窗口标题
+          $mainCppFile = "windows/runner/main.cpp"
+          if (Test-Path $mainCppFile) {
+            # 检测是否包含中文字符
+            $containsChinese = $displayName -match '[\u4e00-\u9fff]'
+            
+            if ($containsChinese) {
+              # 转换中文到Unicode转义序列
+              $unicodeTitle = ""
+              foreach ($char in $displayName.ToCharArray()) {
+                # 如果是ASCII字符，保持原样
+                if ([int][char]$char -lt 128) {
+                  $unicodeTitle += $char
+                } else {
+                  # 转换为Unicode转义序列
+                  $unicodeTitle += "\u" + ([int][char]$char).ToString("X4")
+                }
+              }
+              # 使用Unicode转义序列替换窗口标题
+              (Get-Content $mainCppFile) -replace 'if \(!window.Create\(L"FlClash", origin, size\)\)', "if (!window.Create(L`"$unicodeTitle`", origin, size))" | Set-Content $mainCppFile
+              Write-Host "已修改Windows原生窗口标题 (使用Unicode转义序列)"
+            } else {
+              # 不包含中文，直接使用原字符串
+              (Get-Content $mainCppFile) -replace 'if \(!window.Create\(L"FlClash", origin, size\)\)', "if (!window.Create(L`"$displayName`", origin, size))" | Set-Content $mainCppFile
+              Write-Host "已修改Windows原生窗口标题"
+            }
+          }
+          
+          # 3. 修改托盘提示文本
+          $trayFile = "lib/common/tray.dart"
+          if (Test-Path $trayFile) {
+            $content = Get-Content $trayFile -Raw
+            $content = $content -replace 'trayManager\.setToolTip\(\s*appName,', "trayManager.setToolTip(`"$displayName`","
+            $content | Set-Content $trayFile -Force -Encoding UTF8
+            Write-Host "已修改托盘提示文本为: $displayName"
+          }
+          
+          # 4. 修改应用标题
+          $applicationFile = "lib/application.dart"
+          if (Test-Path $applicationFile) {
+            $content = Get-Content $applicationFile -Raw
+            $content = $content -replace 'title: appName,', "title: `"$displayName`","
+            $content | Set-Content $applicationFile -Force -Encoding UTF8
+            Write-Host "已修改应用标题为: $displayName"
+          }
+        shell: pwsh
+
+      # ============================================
+      # 步骤 15: 修改Runner.rc中的产品名称
+      # ============================================
+      - name: 修改Runner.rc中的产品名称
+        run: |
+          $displayName = "${{ github.event.inputs.display_name }}"
+          $app_id = "${{ github.event.inputs.app_id }}"
+          
+          # 修改Runner.rc中的产品名称 - 将ProductName设为英文app_id，FileDescription保持中文displayName
+          $rcFile = "windows/runner/Runner.rc"
+          if (Test-Path $rcFile) {
+            (Get-Content $rcFile) -replace 'VALUE "ProductName", ".*"', "VALUE `"ProductName`", `"$app_id`"" | Set-Content $rcFile
+            (Get-Content $rcFile) -replace 'VALUE "FileDescription", ".*"', "VALUE `"FileDescription`", `"$displayName`"" | Set-Content $rcFile
+            (Get-Content $rcFile) -replace 'VALUE "InternalName", ".*"', "VALUE `"InternalName`", `"$displayName`"" | Set-Content $rcFile
+            (Get-Content $rcFile) -replace 'VALUE "ProductName", ".*"', "VALUE `"ProductName`", `"$app_id`"" | Set-Content $rcFile
+            (Get-Content $rcFile) -replace 'VALUE "OriginalFilename", ".*"', "VALUE `"OriginalFilename`", `"$app_id.exe`"" | Set-Content $rcFile
+            Write-Host "已修改 $rcFile 中的产品名称为 $app_id (内部标识符)，文件描述为 $displayName (显示名称)"
+          }
+        shell: pwsh
+
+      # ============================================
+      # 步骤 16: 替换 inno_setup.iss 中的进程名
+      # ============================================
+      - name: 替换 inno_setup.iss 中的进程名
+        run: |
+          $app_id = "${{ github.event.inputs.app_id }}"
+          $issFile = "windows/packaging/exe/inno_setup.iss"
+          if (Test-Path $issFile) {
+            $content = Get-Content $issFile -Raw
+            
+            # 替换主程序进程名 - 使用 regex::Escape 方法
+            $content = $content -replace [regex]::Escape("FlClash.exe"), "${app_id}.exe"
+            
+            # 替换Core进程名 - 使用 regex::Escape 方法
+            $content = $content -replace [regex]::Escape("FlClashCore.exe"), "${app_id}Core.exe"
+            
+            # 替换HelperService进程名 - 使用 regex::Escape 方法
+            $content = $content -replace [regex]::Escape("FlClashHelperService.exe"), "${app_id}HelperService.exe"
+            
+            # 写回文件
+            $content | Set-Content $issFile -Force -Encoding UTF8
+            Write-Host "已替换 inno_setup.iss 中的进程名: ${app_id}.exe, ${app_id}Core.exe, ${app_id}HelperService.exe"
+          } else {
+            Write-Host "警告: 找不到 inno_setup.iss 文件"
+          }
+        shell: pwsh       
+        
+      # ============================================
+      # 步骤 17: 确保Windows安装程序配置桌面快捷方式
+      # ============================================
+      - name: 确保Windows安装程序配置桌面快捷方式
+        run: |
+          $displayName = "${{ github.event.inputs.display_name }}"
+          $app_id = "${{ github.event.inputs.app_id }}"
+          
+          # 确保Windows安装程序配置文件使用一致的名称
+          $makeConfigFile = "windows/packaging/exe/make_config.yaml"
+          if (Test-Path $makeConfigFile) {
+            $content = Get-Content $makeConfigFile -Raw
+            
+            # 仅修改显示名称
+            $content = $content -replace "display_name: .*", "display_name: $displayName"
+            
+            # 再次确保安装目录名称使用英文app_id
+            if ($content -match "install_dir_name:") {
+              $content = $content -replace "install_dir_name: .*", "install_dir_name: `"{autopf64}\\$app_id`""
+            } else {
+              $content += "`ninstall_dir_name: `"{autopf64}\\$app_id`""
+            }
+            
+            # 确保创建桌面快捷方式
+            if ($content -notmatch "create_desktop_icon:") {
+              $content += "`ncreate_desktop_icon: true`n"
+            } else {
+              $content = $content -replace "create_desktop_icon: false", "create_desktop_icon: true"
+            }
+            
+            # 写回文件
+            $content | Set-Content $makeConfigFile -Force
+            
+            Write-Host "已更新Windows安装程序配置，确保创建桌面图标并使用英文安装目录名:"
+            Get-Content $makeConfigFile
+          }
+        shell: pwsh
+        
+      # ============================================
+      # 步骤 18: 修改 setup.dart 中的 appName
+      # ============================================
+      - name: 修改 setup.dart 中的 appName
+        run: |
+          $app_id = "${{ github.event.inputs.app_id }}"
+          $setupFile = "setup.dart"
+          
+          # 读取文件内容
+          $content = Get-Content $setupFile -Raw
+          
+          # 修改 appName 为传入的 app_id（单引号）
+          $content = $content -replace "static String get appName => '[^']+';", "static String get appName => '$app_id';"
+          
+          # 写回文件
+          $content | Set-Content $setupFile -Force -Encoding UTF8
+          
+          Write-Host "已修改 setup.dart 中的 appName 为: $app_id"
+        shell: pwsh
+
+      # ============================================
+      # 步骤 19: 设置 Go 环境
+      # ============================================
+      - name: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+          cache-dependency-path: |
+            core/go.sum
+            
+      # ============================================
+      # 步骤 20: 设置 Flutter Master 环境 (ARM64 必需)
+      # ============================================
+      - name: 设置 Flutter Master 环境 (ARM64)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: master  # Windows ARM64 必须使用 master 通道
+          cache: true
+
+      # ============================================
+      # 步骤 21: 获取 Flutter 依赖
+      # ============================================
+      - name: 获取 Flutter 依赖
+        run: flutter pub get
+
+      # ============================================
+      # 步骤 22: 执行构建脚本 (ARM64 架构)
+      # ============================================
+      - name: 执行构建脚本
+        run: dart setup.dart windows --arch arm64 --env stable
+      
+      # ============================================
+      # 步骤 23: 检查构建产物
+      # ============================================
+      - name: 检查构建产物
+        run: |
+          Write-Host "检查构建产物..." -ForegroundColor Yellow
+          
+          # 列出dist目录内容
+          if (Test-Path "dist") {
+            Write-Host "dist目录内容:" -ForegroundColor Green
+            Get-ChildItem -Path "dist" -Recurse | ForEach-Object {
+              Write-Host "  $($_.FullName)" -ForegroundColor Cyan
+            }
+          } else {
+            Write-Host "dist目录不存在" -ForegroundColor Red
+          }
+          
+          # 列出build目录内容
+          if (Test-Path "build/windows/arm64/runner/Release") {
+            Write-Host "build/windows/arm64/runner/Release目录内容:" -ForegroundColor Green
+            Get-ChildItem -Path "build/windows/arm64/runner/Release" -Recurse | ForEach-Object {
+              Write-Host "  $($_.FullName)" -ForegroundColor Cyan
+            }
+          } else {
+            Write-Host "build/windows/arm64/runner/Release目录不存在" -ForegroundColor Yellow
+          }
+          
+          # 搜索所有exe文件
+          Write-Host "搜索所有exe文件:" -ForegroundColor Yellow
+          Get-ChildItem -Path "." -Filter "*.exe" -Recurse | ForEach-Object {
+            Write-Host "  找到exe文件: $($_.FullName)" -ForegroundColor Green
+          }
+        shell: pwsh
+      
+      # ============================================
+      # 步骤 24: 上传构建产物
+      # ============================================
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.app_id }}-${{ github.event.inputs.version }}-windows-arm64
+          path: dist/
+          retention-days: 7
+          
+      # ============================================
+      # 步骤 25: 生成构建总结
+      # ============================================
+      - name: 生成构建总结
+        run: |
+          echo "## 🎉 Windows ARM64 构建完成" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "### 构建信息" >> $env:GITHUB_STEP_SUMMARY
+          echo "- **应用名称**: ${{ github.event.inputs.display_name }}" >> $env:GITHUB_STEP_SUMMARY
+          echo "- **应用ID**: ${{ github.event.inputs.app_id }}" >> $env:GITHUB_STEP_SUMMARY
+          echo "- **版本号**: ${{ github.event.inputs.version }}" >> $env:GITHUB_STEP_SUMMARY
+          echo "- **架构**: ARM64" >> $env:GITHUB_STEP_SUMMARY
+          echo "- **私有仓库**: ${{ env.PRIVATE_REPO }}" >> $env:GITHUB_STEP_SUMMARY
+          echo "- **分支/标签**: ${{ env.PRIVATE_REPO_REF }}" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "### 构建产物" >> $env:GITHUB_STEP_SUMMARY
+          echo '```' >> $env:GITHUB_STEP_SUMMARY
+          Get-ChildItem -Path dist/ >> $env:GITHUB_STEP_SUMMARY
+          echo '```' >> $env:GITHUB_STEP_SUMMARY
+        shell: pwsh
+
+  # ============================================
+  # 上传到 R2 存储 (可选)
+  # ============================================
+  upload-to-r2:
+    needs: build-windows-arm64
+    uses: ./.github/workflows/upload_to_r2.yml
+    with:
+      version: ${{ github.event.inputs.version }}
+      app_id: ${{ github.event.inputs.app_id }}
+      display_name: ${{ github.event.inputs.display_name }}
+      config_urls: ${{ github.event.inputs.config_urls }}
+      update_url: ${{ github.event.inputs.update_url }}
+      icon_url: ${{ github.event.inputs.icon_url }}
+      identifier: ${{ github.event.inputs.identifier }}
+      platform: windows-arm64
+    secrets:
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CF_R2_BUCKET_NAME: ${{ secrets.CF_R2_BUCKET_NAME }}
+      CF_R2_PUBLIC_URL: ${{ secrets.CF_R2_PUBLIC_URL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
