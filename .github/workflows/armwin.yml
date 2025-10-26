@@ -130,7 +130,7 @@ jobs:
           
           # 替换更新URL
           if (Test-Path $apiFile) {
-            (Get-Content $apiFile) -replace "final customUpdateUrl = `"[^`"]+`";", "final customUpdateUrl = `"$updateUrl`";" | Set-Content $apiFile
+            (Get-Content $apiFile) -replace "final customUpdateUrl = \'[^\']*\';", "final customUpdateUrl = '$updateUrl';" | Set-Content $apiFile
             Write-Host "已修改更新URL:"
             Get-Content $apiFile | Select-String "customUpdateUrl"
           } else {
@@ -214,18 +214,27 @@ jobs:
             Get-Content 'windows/packaging/exe/make_config.yaml'
           }
           
+          # 修改 CMakeLists.txt - 使用精确替换避免意外替换
           $cmake_file = "windows/CMakeLists.txt"
-          
-          # 精确替换FlClash为传入的app_id
-          (Get-Content $cmake_file) -replace 'set\(BINARY_NAME "FlClash"\)', "set(BINARY_NAME `"$app_id`")" | Set-Content $cmake_file
-          
-          # 替换核心文件的安装路径
-          $content = Get-Content $cmake_file -Raw
-          $content = $content -replace 'FlClashCore\.exe', "${app_id}Core.exe"
-          $content = $content -replace 'FlClashHelperService\.exe', "${app_id}HelperService.exe"
-          $content | Set-Content $cmake_file -Force
-          
-          Write-Host "已修改 CMakeLists.txt 中的所有文件名"
+          if (Test-Path $cmake_file) {
+            $content = Get-Content $cmake_file -Raw
+            
+            # 精确替换关键位置，避免全局替换
+            $content = $content.Replace('project(FlClash LANGUAGES CXX)', "project($app_id LANGUAGES CXX)")
+            $content = $content.Replace('set(BINARY_NAME "FlClash")', "set(BINARY_NAME `"$app_id`")")
+            $content = $content.Replace('FlClashCore.exe', "${app_id}Core.exe")
+            $content = $content.Replace('FlClashHelperService.exe', "${app_id}HelperService.exe")
+            
+            $content | Set-Content $cmake_file -Force -Encoding UTF8
+            
+            Write-Host "已精确修改 CMakeLists.txt 中的关键引用" -ForegroundColor Green
+            
+            # 验证替换结果
+            Write-Host "`n验证替换结果:" -ForegroundColor Yellow
+            Get-Content $cmake_file | Select-String -Pattern "project\(|BINARY_NAME|Core\.exe|HelperService\.exe" | ForEach-Object { Write-Host "  $_" -ForegroundColor Cyan }
+          } else {
+            Write-Host "警告: 找不到 $cmake_file 文件" -ForegroundColor Red
+          }
         shell: pwsh
 
       # ============================================
@@ -318,22 +327,26 @@ jobs:
       # ============================================
       # 步骤 11: 替换所有FlClash相关字符串
       # ============================================
-      - name: 替换所有FlClash相关字符串
+      - name: 替换所有FlClash相关字符串（改进版）
         run: |
           $app_id = "${{ github.event.inputs.app_id }}"
+          $hasError = $false
           
-          # 1. 替换windows.rs中的服务名称 - 使用 regex::Escape 方法
+          # 1. 替换windows.rs中的服务名称
           $windowsRsFile = "services/helper/src/service/windows.rs"
           if (Test-Path $windowsRsFile) {
             $content = Get-Content $windowsRsFile -Raw
-            
-            # 使用 regex::Escape 确保特殊字符被正确处理
-            $serviceNamePattern = 'const SERVICE_NAME: &str = "FlClashHelperService";'
-            $serviceNameReplacement = "const SERVICE_NAME: &str = `"${app_id}HelperService`";"
-            $content = $content -replace [regex]::Escape($serviceNamePattern), $serviceNameReplacement
-            
+            $content = $content.Replace('const SERVICE_NAME: &str = "FlClashHelperService";', "const SERVICE_NAME: &str = `"${app_id}HelperService`";")
             $content | Set-Content $windowsRsFile -Force -Encoding UTF8
-            Write-Host "已替换 windows.rs 中的服务名称为: ${app_id}HelperService"
+            
+            # 验证替换
+            $verify = Get-Content $windowsRsFile -Raw
+            if ($verify -match "FlClashHelperService") {
+              Write-Host "  ❌ windows.rs 替换失败" -ForegroundColor Red
+              $hasError = $true
+            } else {
+              Write-Host "  ✅ windows.rs 服务名称替换成功: ${app_id}HelperService" -ForegroundColor Green
+            }
           }
           
           # 2. 替换constant.dart中的相关常量
@@ -341,86 +354,77 @@ jobs:
           if (Test-Path $constantDartFile) {
             $content = Get-Content $constantDartFile -Raw
             
-            # 替换appName常量（单引号）
-            $content = $content -replace [regex]::Escape("const appName = 'FlClash';"), "const appName = '$app_id';"
-            if ($content -match [regex]::Escape("const appHelperService = 'FlClashHelperService';")) {
-              $content = $content -replace [regex]::Escape("const appHelperService = 'FlClashHelperService';"), "const appHelperService = '${app_id}HelperService';"
-            }
-            # 如果有额外的appCoreName等常量，确保也替换它们
-            if ($content -match [regex]::Escape("const appCoreName = 'FlClashCore';")) {
-              $content = $content -replace [regex]::Escape("const appCoreName = 'FlClashCore';"), "const appCoreName = '${app_id}Core';"
-            }
-
-            if ($content -match [regex]::Escape("const appSocketPrefix = 'FlClashSocket_';")) {
-              $content = $content -replace [regex]::Escape("const appSocketPrefix = 'FlClashSocket_';"), "const appSocketPrefix = '${app_id}Socket_';"
-            }
-
+            # 按顺序替换（先替换长的，避免部分匹配）
+            $content = $content.Replace("const appHelperService = 'FlClashHelperService';", "const appHelperService = '${app_id}HelperService';")
+            $content = $content.Replace("const appName = 'FlClash';", "const appName = '$app_id';")
+            $content = $content.Replace("FlClashSocket_", "${app_id}Socket_")
+            $content = $content.Replace("'FlClashMainIsolate'", "'${app_id}MainIsolate'")
+            $content = $content.Replace("'FlClashServiceIsolate'", "'${app_id}ServiceIsolate'")
+            $content = $content.Replace("'FlClashHelperService'", "'${app_id}HelperService'")
             
-            # 替换unixSocketPath中的FlClashSocket_ - 使用 regex::Escape 方法
-            $socketPattern = "final unixSocketPath = '/tmp/FlClashSocket_`${Random().nextInt(10000)}.sock';"
-            $socketReplacement = "final unixSocketPath = '/tmp/${app_id}Socket_`${Random().nextInt(10000)}.sock';"
-            $content = $content -replace [regex]::Escape($socketPattern), $socketReplacement
-            
-            # 替换mainIsolate名称 - 使用 regex::Escape 方法
-            $mainIsolatePattern = "final mainIsolate = 'FlClashMainIsolate';"
-            $mainIsolateReplacement = "final mainIsolate = '${app_id}MainIsolate';"
-            $content = $content -replace [regex]::Escape($mainIsolatePattern), $mainIsolateReplacement
-            
-            # 替换serviceIsolate名称 - 使用 regex::Escape 方法
-            $serviceIsolatePattern = "final serviceIsolate = 'FlClashServiceIsolate';"
-            $serviceIsolateReplacement = "final serviceIsolate = '${app_id}ServiceIsolate';"
-            $content = $content -replace [regex]::Escape($serviceIsolatePattern), $serviceIsolateReplacement
-            
-            # 写回文件
             $content | Set-Content $constantDartFile -Force -Encoding UTF8
-            Write-Host "已替换 constant.dart 中的所有 FlClash 相关常量"
+            
+            # 验证替换
+            $verify = Get-Content $constantDartFile -Raw
+            if ($verify -match "const appName = 'FlClash';") {
+              Write-Host "  ❌ appName 替换失败" -ForegroundColor Red
+              $hasError = $true
+            } elseif ($verify -match "const appHelperService = 'FlClashHelperService';") {
+              Write-Host "  ❌ appHelperService 替换失败" -ForegroundColor Red
+              $hasError = $true
+            } elseif ($verify -match "FlClashSocket_") {
+              Write-Host "  ❌ unixSocketPath 替换失败" -ForegroundColor Red
+              $hasError = $true
+            } else {
+              Write-Host "  ✅ constant.dart 所有常量替换成功" -ForegroundColor Green
+              Get-Content $constantDartFile | Select-String -Pattern "const appName|const appHelperService|Socket_" | ForEach-Object { Write-Host "    $_" -ForegroundColor Cyan }
+            }
+          } else {
+            Write-Host "  ❌ 找不到 $constantDartFile 文件" -ForegroundColor Red
+            $hasError = $true
           }
           
-          # 3. 替换path.dart中的相关路径 - 使用简单直接的字符串替换
+          # 3. 替换path.dart中的相关路径（改进替换逻辑）
           $pathDartFile = "lib/common/path.dart"
           if (Test-Path $pathDartFile) {
             $content = Get-Content $pathDartFile -Raw
             
-            # 使用简单的字符串替换，避免复杂的正则表达式
-            $content = $content.Replace("'FlClash.lock'", "'$app_id.lock'")
+            # 使用更精确的替换方式
+            # 替换 corePath getter 中的 FlClashCore
+            $content = $content -replace "join\(executableDirPath,\s*'FlClashCore\`$executableExtension'\)", "join(executableDirPath, '${app_id}Core`$executableExtension')"
+            # 备用：直接字符串替换
             $content = $content.Replace("'FlClashCore`$executableExtension'", "'${app_id}Core`$executableExtension'")
+            # 替换 lockFilePath 中的 FlClash.lock
+            $content = $content.Replace("'FlClash.lock'", "'${app_id}.lock'")
             
-            # 写回文件
             $content | Set-Content $pathDartFile -Force -Encoding UTF8
-            Write-Host "已替换 path.dart 中的所有 FlClash 相关路径"
             
-            # 验证替换结果 - 显示具体内容
-            Write-Host "path.dart 中的关键行:"
-            Get-Content $pathDartFile | Select-String -Pattern "corePath|lockFilePath" -Context 1,1
-            
-            # 额外验证：检查是否还有 FlClash 字符串
-            $remainingFlClash = Get-Content $pathDartFile | Select-String -Pattern "FlClash"
-            if ($remainingFlClash) {
-              Write-Host "警告: path.dart 中仍有未替换的 FlClash 字符串:" -ForegroundColor Red
-              $remainingFlClash | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+            # 严格验证替换
+            $verify = Get-Content $pathDartFile -Raw
+            if ($verify -match "FlClashCore") {
+              Write-Host "  ❌ path.dart 中 corePath 替换失败 - 发现残留 FlClashCore" -ForegroundColor Red
+              Write-Host "     这会导致应用无法找到核心文件！" -ForegroundColor Red
+              $hasError = $true
+            } elseif ($verify -match "'FlClash\.lock'") {
+              Write-Host "  ❌ path.dart 中 lockFilePath 替换失败" -ForegroundColor Red
+              $hasError = $true
             } else {
-              Write-Host "✓ path.dart 中所有 FlClash 字符串已成功替换" -ForegroundColor Green
+              Write-Host "  ✅ path.dart 所有路径替换成功" -ForegroundColor Green
+              Get-Content $pathDartFile | Select-String -Pattern "corePath|lockFilePath" | ForEach-Object { Write-Host "    $_" -ForegroundColor Cyan }
             }
+          } else {
+            Write-Host "  ❌ 找不到 $pathDartFile 文件" -ForegroundColor Red
+            $hasError = $true
           }
           
-          
-          # 4. 验证所有替换是否成功
-          Write-Host "`n========== 验证替换结果 ==========" -ForegroundColor Yellow
-          
-          # 验证 constant.dart
-          Write-Host "`n[constant.dart]" -ForegroundColor Cyan
-          Get-Content "lib/common/constant.dart" | Select-String -Pattern "const appName|const appHelperService"
-          
-          # 验证 path.dart
-          Write-Host "`n[path.dart]" -ForegroundColor Cyan
-          Get-Content "lib/common/path.dart" | Select-String -Pattern "FlClash"
-          
-          # 验证 windows.rs
-          Write-Host "`n[windows.rs]" -ForegroundColor Cyan
-          Get-Content "services/helper/src/service/windows.rs" | Select-String -Pattern "SERVICE_NAME"
-          
-          Write-Host "`n========== 验证完成 ==========" -ForegroundColor Yellow
-          Write-Host "所有FlClash相关字符串替换完成" -ForegroundColor Green
+          # 最终检查
+          if ($hasError) {
+            Write-Host "`n❌❌❌ 替换过程中发现错误，构建失败！" -ForegroundColor Red
+            Write-Host "请检查上述错误信息" -ForegroundColor Red
+            exit 1
+          } else {
+            Write-Host "`n✅✅✅ 所有FlClash相关字符串替换完成并验证通过！" -ForegroundColor Green
+          }
         shell: pwsh
 
       # ============================================
@@ -564,12 +568,13 @@ jobs:
           # 修改Runner.rc中的产品名称 - 将ProductName设为英文app_id，FileDescription保持中文displayName
           $rcFile = "windows/runner/Runner.rc"
           if (Test-Path $rcFile) {
+            (Get-Content $rcFile) -replace 'VALUE "CompanyName", ".*"', "VALUE `"CompanyName`", `"$app_id`"" | Set-Content $rcFile
             (Get-Content $rcFile) -replace 'VALUE "ProductName", ".*"', "VALUE `"ProductName`", `"$app_id`"" | Set-Content $rcFile
             (Get-Content $rcFile) -replace 'VALUE "FileDescription", ".*"', "VALUE `"FileDescription`", `"$displayName`"" | Set-Content $rcFile
             (Get-Content $rcFile) -replace 'VALUE "InternalName", ".*"', "VALUE `"InternalName`", `"$displayName`"" | Set-Content $rcFile
-            (Get-Content $rcFile) -replace 'VALUE "ProductName", ".*"', "VALUE `"ProductName`", `"$app_id`"" | Set-Content $rcFile
             (Get-Content $rcFile) -replace 'VALUE "OriginalFilename", ".*"', "VALUE `"OriginalFilename`", `"$app_id.exe`"" | Set-Content $rcFile
             Write-Host "已修改 $rcFile 中的产品名称为 $app_id (内部标识符)，文件描述为 $displayName (显示名称)"
+            Write-Host "CompanyName 已设置为: $app_id" -ForegroundColor Green
           }
         shell: pwsh
 
@@ -583,22 +588,22 @@ jobs:
           if (Test-Path $issFile) {
             $content = Get-Content $issFile -Raw
             
-            # 替换主程序进程名 - 使用 regex::Escape 方法
-            $content = $content -replace [regex]::Escape("FlClash.exe"), "${app_id}.exe"
-            
-            # 替换Core进程名 - 使用 regex::Escape 方法
-            $content = $content -replace [regex]::Escape("FlClashCore.exe"), "${app_id}Core.exe"
-            
-            # 替换HelperService进程名 - 使用 regex::Escape 方法
-            $content = $content -replace [regex]::Escape("FlClashHelperService.exe"), "${app_id}HelperService.exe"
+            # 直接查找替换（先替换长的，避免部分匹配）
+            $content = $content.Replace("FlClashHelperService.exe", "${app_id}HelperService.exe")
+            $content = $content.Replace("FlClashCore.exe", "${app_id}Core.exe")
+            $content = $content.Replace("FlClash.exe", "${app_id}.exe")
             
             # 写回文件
             $content | Set-Content $issFile -Force -Encoding UTF8
-            Write-Host "已替换 inno_setup.iss 中的进程名: ${app_id}.exe, ${app_id}Core.exe, ${app_id}HelperService.exe"
+            Write-Host "已替换 inno_setup.iss 中的进程名: ${app_id}.exe, ${app_id}Core.exe, ${app_id}HelperService.exe" -ForegroundColor Green
+            
+            # 验证替换结果
+            Write-Host "`n验证替换结果:" -ForegroundColor Yellow
+            Get-Content $issFile | Select-String -Pattern "Processes :=" -Context 0,3 | ForEach-Object { Write-Host "  $_" -ForegroundColor Cyan }
           } else {
-            Write-Host "警告: 找不到 inno_setup.iss 文件"
+            Write-Host "警告: 找不到 inno_setup.iss 文件" -ForegroundColor Red
           }
-        shell: pwsh       
+        shell: pwsh      
         
       # ============================================
       # 步骤 17: 确保Windows安装程序配置桌面快捷方式
@@ -649,13 +654,96 @@ jobs:
           # 读取文件内容
           $content = Get-Content $setupFile -Raw
           
-          # 修改 appName 为传入的 app_id（单引号）
-          $content = $content -replace "static String get appName => '[^']+';", "static String get appName => '$app_id';"
+          # 直接查找替换（单引号）
+          $content = $content.Replace("static String get appName => 'FlClash';", "static String get appName => '$app_id';")
           
           # 写回文件
           $content | Set-Content $setupFile -Force -Encoding UTF8
           
-          Write-Host "已修改 setup.dart 中的 appName 为: $app_id"
+          Write-Host "已修改 setup.dart 中的 appName 为: $app_id" -ForegroundColor Green
+          
+          # 验证替换结果
+          Write-Host "`n验证替换结果:" -ForegroundColor Yellow
+          Get-Content $setupFile | Select-String -Pattern "static String get appName" | ForEach-Object { Write-Host "  $_" -ForegroundColor Cyan }
+        shell: pwsh
+
+      - name: 🔍 最终验证所有关键替换
+        run: |
+          Write-Host "========================================" -ForegroundColor Cyan
+          Write-Host "   最终验证：确保退出时能正确清理进程" -ForegroundColor Cyan
+          Write-Host "========================================" -ForegroundColor Cyan
+          
+          $app_id = "${{ github.event.inputs.app_id }}"
+          $allPassed = $true
+          
+          # 检查关键文件
+          $checks = @(
+            @{
+              File = "lib/common/constant.dart"
+              Pattern = "FlClashHelperService|const appName = 'FlClash';"
+              Name = "常量定义"
+            },
+            @{
+              File = "lib/common/path.dart"
+              Pattern = "FlClashCore|'FlClash\.lock'"
+              Name = "路径配置"
+            },
+            @{
+              File = "services/helper/src/service/windows.rs"
+              Pattern = 'SERVICE_NAME.*FlClashHelperService'
+              Name = "Windows服务名"
+            },
+            @{
+              File = "windows/packaging/exe/inno_setup.iss"
+              Pattern = "FlClash\.exe|FlClashCore\.exe|FlClashHelperService\.exe"
+              Name = "安装脚本进程名"
+            }
+          )
+          
+          foreach ($check in $checks) {
+            if (Test-Path $check.File) {
+              $content = Get-Content $check.File -Raw
+              if ($content -match $check.Pattern) {
+                Write-Host "❌ $($check.Name) ($($check.File)): 发现未替换的FlClash引用" -ForegroundColor Red
+                # 显示匹配的行
+                Get-Content $check.File | Select-String -Pattern $check.Pattern | ForEach-Object {
+                  Write-Host "   行 $($_.LineNumber): $($_.Line)" -ForegroundColor Yellow
+                }
+                $allPassed = $false
+              } else {
+                Write-Host "✅ $($check.Name) ($($check.File)): 验证通过" -ForegroundColor Green
+              }
+            } else {
+              Write-Host "⚠️  $($check.Name) ($($check.File)): 文件不存在" -ForegroundColor Yellow
+            }
+          }
+          
+          # 验证核心替换
+          Write-Host "`n关键配置验证:" -ForegroundColor Cyan
+          Write-Host "  应用ID: $app_id" -ForegroundColor White
+          
+          if (Test-Path "lib/common/constant.dart") {
+            $appNameLine = Get-Content "lib/common/constant.dart" | Select-String "const appName"
+            $helperLine = Get-Content "lib/common/constant.dart" | Select-String "const appHelperService"
+            Write-Host "  AppName: $appNameLine" -ForegroundColor White
+            Write-Host "  HelperService: $helperLine" -ForegroundColor White
+          }
+          
+          if (Test-Path "lib/common/path.dart") {
+            $corePathLine = Get-Content "lib/common/path.dart" | Select-String "corePath" -Context 0,2
+            Write-Host "  CorePath配置:" -ForegroundColor White
+            $corePathLine | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+          }
+          
+          Write-Host "`n========================================" -ForegroundColor Cyan
+          if ($allPassed) {
+            Write-Host "✅✅✅ 所有验证通过！退出流程将正确清理所有进程" -ForegroundColor Green
+            Write-Host "========================================" -ForegroundColor Cyan
+          } else {
+            Write-Host "❌❌❌ 验证失败！请修复上述问题" -ForegroundColor Red
+            Write-Host "========================================" -ForegroundColor Cyan
+            exit 1
+          }
         shell: pwsh
 
       # ============================================
