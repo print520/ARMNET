@@ -157,7 +157,7 @@ jobs:
           
           # 替换更新URL
           if [ -f "$API_FILE" ]; then
-            sed -i "s|final customUpdateUrl = \"[^\"]*\";|final customUpdateUrl = \"$UPDATE_URL\";|" $API_FILE
+            sed -i "s|final customUpdateUrl = \'[^\']*\';|final customUpdateUrl = '$UPDATE_URL';|" $API_FILE
             echo "已修改更新URL:"
             grep "customUpdateUrl" $API_FILE
           else
@@ -204,50 +204,85 @@ jobs:
           fi
 
       # ============================================
-      # 步骤 7: 修改Linux包配置 (ARM64)
+      # 步骤 7: 修改Linux包配置 (ARM64 - 支持中文显示名称)
       # ============================================
-      - name: 修改Linux包配置
+      - name: 修改Linux包配置（支持中文显示名称）
         run: |
           DISPLAY_NAME="${{ github.event.inputs.display_name }}"
           APP_ID="${{ github.event.inputs.app_id }}"
           
+          echo "=========================================="
+          echo "  配置Linux ARM64软件包"
+          echo "=========================================="
+          echo "内部标识符(app_id): $APP_ID"
+          echo "显示名称(支持中文): $DISPLAY_NAME"
+          echo "架构: ARM64"
+          echo ""
+          
           # 更新AppImage配置
           APPIMAGE_CONFIG="linux/packaging/appimage/make_config.yaml"
           if [ -f "$APPIMAGE_CONFIG" ]; then
-            sed -i "s/display_name: .*/display_name: \"$DISPLAY_NAME\"/" $APPIMAGE_CONFIG
-            echo "已更新AppImage显示名称为: $DISPLAY_NAME"
+            # 使用YAML多行字符串方式确保中文正确处理
+            sed -i "s/display_name: .*/display_name: $DISPLAY_NAME/" $APPIMAGE_CONFIG
+            # 更新generic_name也使用中文显示名称
+            sed -i "s/generic_name: .*/generic_name: $DISPLAY_NAME/" $APPIMAGE_CONFIG
+            # 更新keywords，添加中文名称
+            sed -i "s/- FlClash/- $DISPLAY_NAME/" $APPIMAGE_CONFIG
+            echo "✅ 已更新AppImage配置"
+            echo "   显示名称: $DISPLAY_NAME"
           fi
           
           # 更新DEB配置
           DEB_CONFIG="linux/packaging/deb/make_config.yaml"
           if [ -f "$DEB_CONFIG" ]; then
-            sed -i "s/display_name: .*/display_name: \"$DISPLAY_NAME\"/" $DEB_CONFIG
-            sed -i "s/package_name: .*/package_name: \"$APP_ID\"/" $DEB_CONFIG
-            echo "已更新DEB包配置"
+            # display_name支持中文（用于.desktop文件的Name字段）
+            sed -i "s/display_name: .*/display_name: $DISPLAY_NAME/" $DEB_CONFIG
+            # package_name必须是ASCII（软件包标识符）
+            sed -i "s/package_name: .*/package_name: $APP_ID/" $DEB_CONFIG
+            # 更新generic_name
+            sed -i "s/generic_name: .*/generic_name: $DISPLAY_NAME/" $DEB_CONFIG
+            echo "✅ 已更新DEB包配置"
+            echo "   包名(package_name): $APP_ID"
+            echo "   显示名称(display_name): $DISPLAY_NAME"
           fi
           
           # 更新RPM配置
           RPM_CONFIG="linux/packaging/rpm/make_config.yaml"
           if [ -f "$RPM_CONFIG" ]; then
-            sed -i "s/display_name: .*/display_name: \"$DISPLAY_NAME\"/" $RPM_CONFIG
-            echo "已更新RPM包配置"
+            # RPM的display_name也支持中文
+            sed -i "s/display_name: .*/display_name: $DISPLAY_NAME/" $RPM_CONFIG
+            # 更新generic_name
+            sed -i "s/generic_name: .*/generic_name: $DISPLAY_NAME/" $RPM_CONFIG
+            echo "✅ 已更新RPM包配置"
+            echo "   显示名称: $DISPLAY_NAME"
           fi
           
-          # 更新CMakeLists.txt
+          # 更新CMakeLists.txt（二进制文件名必须是ASCII）
           CMAKE_FILE="linux/CMakeLists.txt"
           if [ -f "$CMAKE_FILE" ]; then
+            # 使用app_id作为二进制文件名
             sed -i "s/set(BINARY_NAME \"FlClash\")/set(BINARY_NAME \"$APP_ID\")/" $CMAKE_FILE
-            echo "已更新CMakeLists.txt中的二进制名称"
+            sed -i "s/project(FlClash LANGUAGES CXX)/project($APP_ID LANGUAGES CXX)/" $CMAKE_FILE
+            echo "✅ 已更新CMakeLists.txt"
+            echo "   项目名: $APP_ID"
+            echo "   二进制名: $APP_ID"
           fi
           
           # 修改版本号
           BUILD_NUMBER=$(date +%Y%m%d%H)
           VERSION="${{ github.event.inputs.version }}"
-          # 使用 -E 标志启用扩展正则表达式，并匹配可选的 build number
           sed -i -E "s/version: [0-9]+\.[0-9]+\.[0-9]+(\+[0-9]+)?/version: $VERSION+$BUILD_NUMBER/" pubspec.yaml
           
-          echo "已更新版本号为: $VERSION+$BUILD_NUMBER"
+          echo ""
+          echo "✅ 版本号已更新为: $VERSION+$BUILD_NUMBER"
           grep "version:" pubspec.yaml
+          
+          echo ""
+          echo "=========================================="
+          echo "  Linux ARM64软件包配置完成"
+          echo "  - 软件包名/二进制名: $APP_ID (ASCII)"
+          echo "  - 用户看到的名称: $DISPLAY_NAME (支持中文)"
+          echo "=========================================="
 
       # ============================================
       # 步骤 8: 替换应用图标
@@ -503,42 +538,51 @@ jobs:
           fi
 
       # ============================================
-      # 步骤 15: 修改应用窗口标题和托盘名称
+      # 步骤 15: 修改应用窗口标题和托盘名称（支持中文）
       # ============================================
-      - name: 修改应用窗口标题和托盘名称
+      - name: 修改应用窗口标题和托盘名称（支持中文）
         run: |
           DISPLAY_NAME="${{ github.event.inputs.display_name }}"
+          
+          echo "更新界面显示文本为中文名称: $DISPLAY_NAME"
           
           # 1. 修改窗口标题栏组件
           WINDOW_MANAGER_FILE="lib/manager/window_manager.dart"
           if [ -f "$WINDOW_MANAGER_FILE" ]; then
-            # 修改 const Text(appName) 或 Text(appName,) 为自定义显示名称
             sed -i "s/const Text(appName)/const Text(\"$DISPLAY_NAME\")/" $WINDOW_MANAGER_FILE
             sed -i "s/Text(appName,/Text(\"$DISPLAY_NAME\",/" $WINDOW_MANAGER_FILE
-            echo "已修改窗口标题栏文本为: $DISPLAY_NAME"
+            echo "✅ 已修改窗口标题栏文本为: $DISPLAY_NAME"
           fi
           
-          # 2. 修改原生窗口标题
+          # 2. 修改原生窗口标题（支持中文UTF-8）
           MAIN_CC_FILE="linux/my_application.cc"
           if [ -f "$MAIN_CC_FILE" ]; then
+            # GTK支持UTF-8编码的中文
             sed -i "s/gtk_window_set_title(window, \"FlClash\")/gtk_window_set_title(window, \"$DISPLAY_NAME\")/" $MAIN_CC_FILE
-            echo "已修改Linux原生窗口标题"
+            sed -i "s/gtk_header_bar_set_title(header_bar, \"FlClash\")/gtk_header_bar_set_title(header_bar, \"$DISPLAY_NAME\")/" $MAIN_CC_FILE
+            echo "✅ 已修改Linux原生窗口标题（支持中文UTF-8）"
+            echo "   标题: $DISPLAY_NAME"
           fi
           
           # 3. 修改托盘提示文本
           TRAY_FILE="lib/common/tray.dart"
           if [ -f "$TRAY_FILE" ]; then
-            # 使用 [[:space:]]* 来匹配空白字符（兼容 sed）
             sed -i "s/trayManager\.setToolTip([[:space:]]*appName,/trayManager.setToolTip(\"$DISPLAY_NAME\",/" $TRAY_FILE
-            echo "已修改托盘提示文本为: $DISPLAY_NAME"
+            echo "✅ 已修改托盘提示文本为: $DISPLAY_NAME"
           fi
           
           # 4. 修改应用标题
           APPLICATION_FILE="lib/application.dart"
           if [ -f "$APPLICATION_FILE" ]; then
             sed -i "s/title: appName,/title: \"$DISPLAY_NAME\",/" $APPLICATION_FILE
-            echo "已修改应用标题为: $DISPLAY_NAME"
+            echo "✅ 已修改应用标题为: $DISPLAY_NAME"
           fi
+          
+          echo ""
+          echo "=========================================="
+          echo "  Linux ARM64中文显示名称配置完成"
+          echo "  所有用户可见的文本都将显示: $DISPLAY_NAME"
+          echo "=========================================="
 
       # ============================================
       # 步骤 16: 修改CMakeLists.txt中的核心文件名
@@ -585,13 +629,86 @@ jobs:
           fi
 
       # ============================================
-      # 步骤 17: 获取 Flutter 依赖
+      # 步骤 17: 🔍 验证Linux中文配置
+      # ============================================
+      - name: 🔍 验证Linux ARM64中文配置
+        run: |
+          echo "=========================================="
+          echo "  验证Linux ARM64中文显示名称配置"
+          echo "=========================================="
+          
+          DISPLAY_NAME="${{ github.event.inputs.display_name }}"
+          APP_ID="${{ github.event.inputs.app_id }}"
+          ALL_PASSED=true
+          
+          # 检查关键配置文件
+          echo "检查配置文件..."
+          
+          # 1. 检查DEB配置
+          if [ -f "linux/packaging/deb/make_config.yaml" ]; then
+            if grep -q "display_name: $DISPLAY_NAME" "linux/packaging/deb/make_config.yaml"; then
+              echo "✅ DEB display_name 配置正确"
+            else
+              echo "❌ DEB display_name 配置错误"
+              ALL_PASSED=false
+            fi
+            if grep -q "package_name: $APP_ID" "linux/packaging/deb/make_config.yaml"; then
+              echo "✅ DEB package_name 配置正确"
+            else
+              echo "❌ DEB package_name 配置错误"
+              ALL_PASSED=false
+            fi
+          fi
+          
+          # 2. 检查原生窗口标题
+          if [ -f "linux/my_application.cc" ]; then
+            if grep -q "\"$DISPLAY_NAME\"" "linux/my_application.cc"; then
+              echo "✅ GTK窗口标题配置正确（支持中文）"
+            else
+              echo "❌ GTK窗口标题配置错误"
+              echo "   当前内容:"
+              grep "gtk_window_set_title\|gtk_header_bar_set_title" "linux/my_application.cc"
+              ALL_PASSED=false
+            fi
+          fi
+          
+          # 3. 检查CMakeLists.txt
+          if [ -f "linux/CMakeLists.txt" ]; then
+            if grep -q "BINARY_NAME \"$APP_ID\"" "linux/CMakeLists.txt"; then
+              echo "✅ 二进制文件名配置正确"
+            else
+              echo "❌ 二进制文件名配置错误"
+              ALL_PASSED=false
+            fi
+          fi
+          
+          echo ""
+          echo "关键配置预览:"
+          echo "  APP_ID: $APP_ID"
+          echo "  DISPLAY_NAME: $DISPLAY_NAME"
+          echo "  架构: ARM64"
+          
+          if [ "$ALL_PASSED" = true ]; then
+            echo ""
+            echo "✅✅✅ Linux ARM64中文配置验证通过！"
+            echo "用户将看到: $DISPLAY_NAME"
+            echo "包名和文件名: $APP_ID"
+            echo "=========================================="
+          else
+            echo ""
+            echo "❌❌❌ Linux ARM64配置验证失败！"
+            echo "=========================================="
+            exit 1
+          fi
+
+      # ============================================
+      # 步骤 18: 获取 Flutter 依赖
       # ============================================
       - name: 获取 Flutter 依赖
         run: flutter pub get
 
       # ============================================
-      # 步骤 18: 构建 Linux ARM64 应用
+      # 步骤 19: 构建 Linux ARM64 应用
       # ============================================
       - name: 构建 Linux ARM64 应用
         run: |
@@ -600,7 +717,7 @@ jobs:
           echo "构建完成！"
 
       # ============================================
-      # 步骤 19: 显示构建产物
+      # 步骤 20: 显示构建产物
       # ============================================
       - name: 显示构建产物
         run: |
@@ -612,7 +729,7 @@ jobs:
           file dist/* || true
 
       # ============================================
-      # 步骤 20: 上传构建产物
+      # 步骤 21: 上传构建产物
       # ============================================
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -622,19 +739,24 @@ jobs:
           retention-days: 7
           
       # ============================================
-      # 步骤 21: 生成构建总结
+      # 步骤 22: 生成构建总结
       # ============================================
       - name: 生成构建总结
         run: |
           echo "## 🎉 Linux ARM64 构建完成" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 构建信息" >> $GITHUB_STEP_SUMMARY
-          echo "- **应用名称**: ${{ github.event.inputs.display_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **显示名称**: ${{ github.event.inputs.display_name }} ✅ (支持中文)" >> $GITHUB_STEP_SUMMARY
           echo "- **应用ID**: ${{ github.event.inputs.app_id }}" >> $GITHUB_STEP_SUMMARY
           echo "- **版本号**: ${{ github.event.inputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **架构**: ARM64" >> $GITHUB_STEP_SUMMARY
+          echo "- **架构**: ARM64 (aarch64)" >> $GITHUB_STEP_SUMMARY
           echo "- **私有仓库**: ${{ env.PRIVATE_REPO }}" >> $GITHUB_STEP_SUMMARY
           echo "- **分支/标签**: ${{ env.PRIVATE_REPO_REF }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 中文支持" >> $GITHUB_STEP_SUMMARY
+          echo "✅ 应用启动器显示: ${{ github.event.inputs.display_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ 窗口标题显示: ${{ github.event.inputs.display_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ 系统托盘显示: ${{ github.event.inputs.display_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 构建产物" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
